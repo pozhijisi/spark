@@ -18,12 +18,12 @@
 package org.apache.spark.streaming
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream, File, ObjectOutputStream}
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentLinkedQueue
 
 import scala.collection.JavaConverters._
 import scala.reflect.ClassTag
 
-import com.google.common.base.Charsets
 import com.google.common.io.Files
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
@@ -71,7 +71,7 @@ trait DStreamCheckpointTester { self: SparkFunSuite =>
   /**
    * Tests a streaming operation under checkpointing, by restarting the operation
    * from checkpoint file and verifying whether the final output is correct.
-   * The output is assumed to have come from a reliable queue which an replay
+   * The output is assumed to have come from a reliable queue which a replay
    * data as required.
    *
    * NOTE: This takes into consideration that the last batch processed before
@@ -133,6 +133,17 @@ trait DStreamCheckpointTester { self: SparkFunSuite =>
     new StreamingContext(SparkContext.getOrCreate(conf), batchDuration)
   }
 
+  /**
+   * Get the first TestOutputStreamWithPartitions, does not check the provided generic type.
+   */
+  protected def getTestOutputStream[V: ClassTag](streams: Array[DStream[_]]):
+    TestOutputStreamWithPartitions[V] = {
+    streams.collect {
+      case ds: TestOutputStreamWithPartitions[V @unchecked] => ds
+    }.head
+  }
+
+
   protected def generateOutput[V: ClassTag](
       ssc: StreamingContext,
       targetBatchTime: Time,
@@ -150,9 +161,7 @@ trait DStreamCheckpointTester { self: SparkFunSuite =>
       clock.setTime(targetBatchTime.milliseconds)
       logInfo("Manual clock after advancing = " + clock.getTimeMillis())
 
-      val outputStream = ssc.graph.getOutputStreams().filter { dstream =>
-        dstream.isInstanceOf[TestOutputStreamWithPartitions[V]]
-      }.head.asInstanceOf[TestOutputStreamWithPartitions[V]]
+      val outputStream = getTestOutputStream[V](ssc.graph.getOutputStreams())
 
       eventually(timeout(10 seconds)) {
         ssc.awaitTerminationOrTimeout(10)
@@ -219,6 +228,11 @@ class CheckpointSuite extends TestSuiteBase with DStreamCheckpointTester
     }
   }
 
+  test("non-existent checkpoint dir") {
+    // SPARK-13211
+    intercept[IllegalArgumentException](new StreamingContext("nosuchdirectory"))
+  }
+
   test("basic rdd checkpoints + dstream graph checkpoint recovery") {
 
     assert(batchDuration === Milliseconds(500), "batchDuration for this test must be 1 second")
@@ -253,10 +267,9 @@ class CheckpointSuite extends TestSuiteBase with DStreamCheckpointTester
     assert(!stateStream.checkpointData.currentCheckpointFiles.isEmpty,
       "No checkpointed RDDs in state stream before first failure")
     stateStream.checkpointData.currentCheckpointFiles.foreach {
-      case (time, file) => {
+      case (time, file) =>
         assert(fs.exists(new Path(file)), "Checkpoint file '" + file +"' for time " + time +
             " for state stream before first failure does not exist")
-      }
     }
 
     // Run till a further time such that previous checkpoint files in the stream would be deleted
@@ -283,10 +296,9 @@ class CheckpointSuite extends TestSuiteBase with DStreamCheckpointTester
     assert(!stateStream.checkpointData.currentCheckpointFiles.isEmpty,
       "No checkpointed RDDs in state stream before second failure")
     stateStream.checkpointData.currentCheckpointFiles.foreach {
-      case (time, file) => {
+      case (time, file) =>
         assert(fs.exists(new Path(file)), "Checkpoint file '" + file +"' for time " + time +
           " for state stream before seconds failure does not exist")
-      }
     }
     ssc.stop()
 
@@ -600,7 +612,7 @@ class CheckpointSuite extends TestSuiteBase with DStreamCheckpointTester
      */
     def writeFile(i: Int, clock: Clock): Unit = {
       val file = new File(testDir, i.toString)
-      Files.write(i + "\n", file, Charsets.UTF_8)
+      Files.write(i + "\n", file, StandardCharsets.UTF_8)
       assert(file.setLastModified(clock.getTimeMillis()))
       // Check that the file's modification date is actually the value we wrote, since rounding or
       // truncation will break the test:
@@ -613,7 +625,8 @@ class CheckpointSuite extends TestSuiteBase with DStreamCheckpointTester
     def recordedFiles(ssc: StreamingContext): Seq[Int] = {
       val fileInputDStream =
         ssc.graph.getInputStreams().head.asInstanceOf[FileInputDStream[_, _, _]]
-      val filenames = fileInputDStream.batchTimeToSelectedFiles.values.flatten
+      val filenames = fileInputDStream.batchTimeToSelectedFiles.synchronized
+         { fileInputDStream.batchTimeToSelectedFiles.values.flatten }
       filenames.map(_.split(File.separator).last.toInt).toSeq.sorted
     }
 
@@ -907,9 +920,7 @@ class CheckpointSuite extends TestSuiteBase with DStreamCheckpointTester
     logInfo("Manual clock after advancing = " + clock.getTimeMillis())
     Thread.sleep(batchDuration.milliseconds)
 
-    val outputStream = ssc.graph.getOutputStreams().filter { dstream =>
-      dstream.isInstanceOf[TestOutputStreamWithPartitions[V]]
-    }.head.asInstanceOf[TestOutputStreamWithPartitions[V]]
+    val outputStream = getTestOutputStream[V](ssc.graph.getOutputStreams())
     outputStream.output.asScala.map(_.flatten)
   }
 }

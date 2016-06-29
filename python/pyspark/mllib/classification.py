@@ -16,6 +16,7 @@
 #
 
 from math import exp
+import warnings
 
 import numpy
 from numpy import array
@@ -51,7 +52,7 @@ class LinearClassificationModel(LinearModel):
 
         Sets the threshold that separates positive predictions from
         negative predictions. An example with prediction score greater
-        than or equal to this threshold is identified as an positive,
+        than or equal to this threshold is identified as a positive,
         and negative otherwise. It is used for binary classification
         only.
         """
@@ -266,6 +267,8 @@ class LogisticRegressionModel(LinearClassificationModel):
 class LogisticRegressionWithSGD(object):
     """
     .. versionadded:: 0.9.0
+    .. note:: Deprecated in 2.0.0. Use ml.classification.LogisticRegression or
+            LogisticRegressionWithLBFGS.
     """
     @classmethod
     @since('0.9.0')
@@ -294,7 +297,7 @@ class LogisticRegressionWithSGD(object):
           (default: 0.01)
         :param regType:
           The type of regularizer used for training our model.
-          Allowed values:
+          Supported values:
 
             - "l1" for using L1 regularization
             - "l2" for using L2 regularization (default)
@@ -312,6 +315,10 @@ class LogisticRegressionWithSGD(object):
           A condition which decides iteration termination.
           (default: 0.001)
         """
+        warnings.warn(
+            "Deprecated in 2.0.0. Use ml.classification.LogisticRegression or "
+            "LogisticRegressionWithLBFGS.")
+
         def train(rdd, i):
             return callMLlibFunc("trainLogisticRegressionModelWithSGD", rdd, int(iterations),
                                  float(step), float(miniBatchFraction), i, float(regParam), regType,
@@ -326,8 +333,8 @@ class LogisticRegressionWithLBFGS(object):
     """
     @classmethod
     @since('1.2.0')
-    def train(cls, data, iterations=100, initialWeights=None, regParam=0.01, regType="l2",
-              intercept=False, corrections=10, tolerance=1e-4, validateData=True, numClasses=2):
+    def train(cls, data, iterations=100, initialWeights=None, regParam=0.0, regType="l2",
+              intercept=False, corrections=10, tolerance=1e-6, validateData=True, numClasses=2):
         """
         Train a logistic regression model on the given data.
 
@@ -341,10 +348,10 @@ class LogisticRegressionWithLBFGS(object):
           (default: None)
         :param regParam:
           The regularizer parameter.
-          (default: 0.01)
+          (default: 0.0)
         :param regType:
           The type of regularizer used for training our model.
-          Allowed values:
+          Supported values:
 
             - "l1" for using L1 regularization
             - "l2" for using L2 regularization (default)
@@ -356,10 +363,12 @@ class LogisticRegressionWithLBFGS(object):
           (default: False)
         :param corrections:
           The number of corrections used in the LBFGS update.
-          (default: 10)
+          If a known updater is used for binary classification,
+          it calls the ml implementation and this parameter will
+          have no effect. (default: 10)
         :param tolerance:
           The convergence tolerance of iterations for L-BFGS.
-          (default: 1e-4)
+          (default: 1e-6)
         :param validateData:
           Boolean parameter which indicates if the algorithm should
           validate data before training.
@@ -747,12 +756,16 @@ class StreamingLogisticRegressionWithSGD(StreamingLinearAlgorithm):
 
 def _test():
     import doctest
-    from pyspark import SparkContext
+    from pyspark.sql import SparkSession
     import pyspark.mllib.classification
     globs = pyspark.mllib.classification.__dict__.copy()
-    globs['sc'] = SparkContext('local[4]', 'PythonTest', batchSize=2)
+    spark = SparkSession.builder\
+        .master("local[4]")\
+        .appName("mllib.classification tests")\
+        .getOrCreate()
+    globs['sc'] = spark.sparkContext
     (failure_count, test_count) = doctest.testmod(globs=globs, optionflags=doctest.ELLIPSIS)
-    globs['sc'].stop()
+    spark.stop()
     if failure_count:
         exit(-1)
 

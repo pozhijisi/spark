@@ -52,6 +52,23 @@ class DataTypeSuite extends SparkFunSuite {
     assert(StructField("b", LongType, false) === struct("b"))
   }
 
+  test("construct with add from StructField with comments") {
+    // Test creation from StructField using four different ways
+    val struct = (new StructType)
+      .add("a", "int", true, "test1")
+      .add("b", StringType, true, "test3")
+      .add(StructField("c", LongType, false).withComment("test4"))
+      .add(StructField("d", LongType))
+
+    assert(StructField("a", IntegerType, true).withComment("test1") == struct("a"))
+    assert(StructField("b", StringType, true).withComment("test3") == struct("b"))
+    assert(StructField("c", LongType, false).withComment("test4") == struct("c"))
+    assert(StructField("d", LongType) == struct("d"))
+
+    assert(struct("c").getComment() == Option("test4"))
+    assert(struct("d").getComment().isEmpty)
+  }
+
   test("construct with String DataType") {
     // Test creation with DataType as String
     val struct = (new StructType)
@@ -248,15 +265,15 @@ class DataTypeSuite extends SparkFunSuite {
   checkDefaultSize(LongType, 8)
   checkDefaultSize(FloatType, 4)
   checkDefaultSize(DoubleType, 8)
-  checkDefaultSize(DecimalType(10, 5), 4096)
-  checkDefaultSize(DecimalType.SYSTEM_DEFAULT, 4096)
+  checkDefaultSize(DecimalType(10, 5), 8)
+  checkDefaultSize(DecimalType.SYSTEM_DEFAULT, 16)
   checkDefaultSize(DateType, 4)
   checkDefaultSize(TimestampType, 8)
-  checkDefaultSize(StringType, 4096)
-  checkDefaultSize(BinaryType, 4096)
+  checkDefaultSize(StringType, 20)
+  checkDefaultSize(BinaryType, 100)
   checkDefaultSize(ArrayType(DoubleType, true), 800)
-  checkDefaultSize(ArrayType(StringType, false), 409600)
-  checkDefaultSize(MapType(IntegerType, StringType, true), 410000)
+  checkDefaultSize(ArrayType(StringType, false), 2000)
+  checkDefaultSize(MapType(IntegerType, StringType, true), 2400)
   checkDefaultSize(MapType(IntegerType, ArrayType(DoubleType), false), 80400)
   checkDefaultSize(structType, 812)
 

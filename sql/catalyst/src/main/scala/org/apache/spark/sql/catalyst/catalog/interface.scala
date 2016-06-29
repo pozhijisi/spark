@@ -17,144 +17,86 @@
 
 package org.apache.spark.sql.catalyst.catalog
 
+import java.util.Date
+import javax.annotation.Nullable
+
 import org.apache.spark.sql.AnalysisException
-
-
-/**
- * Interface for the system catalog (of columns, partitions, tables, and databases).
- *
- * This is only used for non-temporary items, and implementations must be thread-safe as they
- * can be accessed in multiple threads.
- *
- * Implementations should throw [[AnalysisException]] when table or database don't exist.
- */
-abstract class Catalog {
-  import Catalog._
-
-  // --------------------------------------------------------------------------
-  // Databases
-  // --------------------------------------------------------------------------
-
-  def createDatabase(dbDefinition: Database, ignoreIfExists: Boolean): Unit
-
-  def dropDatabase(db: String, ignoreIfNotExists: Boolean, cascade: Boolean): Unit
-
-  /**
-   * Alter an existing database. This operation does not support renaming.
-   */
-  def alterDatabase(db: String, dbDefinition: Database): Unit
-
-  def getDatabase(db: String): Database
-
-  def listDatabases(): Seq[String]
-
-  def listDatabases(pattern: String): Seq[String]
-
-  // --------------------------------------------------------------------------
-  // Tables
-  // --------------------------------------------------------------------------
-
-  def createTable(db: String, tableDefinition: Table, ignoreIfExists: Boolean): Unit
-
-  def dropTable(db: String, table: String, ignoreIfNotExists: Boolean): Unit
-
-  def renameTable(db: String, oldName: String, newName: String): Unit
-
-  /**
-   * Alter an existing table. This operation does not support renaming.
-   */
-  def alterTable(db: String, table: String, tableDefinition: Table): Unit
-
-  def getTable(db: String, table: String): Table
-
-  def listTables(db: String): Seq[String]
-
-  def listTables(db: String, pattern: String): Seq[String]
-
-  // --------------------------------------------------------------------------
-  // Partitions
-  // --------------------------------------------------------------------------
-
-  def createPartitions(
-      db: String,
-      table: String,
-      parts: Seq[TablePartition],
-      ignoreIfExists: Boolean): Unit
-
-  def dropPartitions(
-      db: String,
-      table: String,
-      parts: Seq[PartitionSpec],
-      ignoreIfNotExists: Boolean): Unit
-
-  /**
-   * Alter an existing table partition and optionally override its spec.
-   */
-  def alterPartition(
-      db: String,
-      table: String,
-      spec: PartitionSpec,
-      newPart: TablePartition): Unit
-
-  def getPartition(db: String, table: String, spec: PartitionSpec): TablePartition
-
-  // TODO: support listing by pattern
-  def listPartitions(db: String, table: String): Seq[TablePartition]
-
-  // --------------------------------------------------------------------------
-  // Functions
-  // --------------------------------------------------------------------------
-
-  def createFunction(db: String, funcDefinition: Function, ignoreIfExists: Boolean): Unit
-
-  def dropFunction(db: String, funcName: String): Unit
-
-  /**
-   * Alter an existing function and optionally override its name.
-   */
-  def alterFunction(db: String, funcName: String, funcDefinition: Function): Unit
-
-  def getFunction(db: String, funcName: String): Function
-
-  def listFunctions(db: String, pattern: String): Seq[String]
-
-}
+import org.apache.spark.sql.catalyst.{FunctionIdentifier, TableIdentifier}
+import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference}
+import org.apache.spark.sql.catalyst.parser.CatalystSqlParser
+import org.apache.spark.sql.catalyst.plans.logical.{LeafNode, LogicalPlan}
 
 
 /**
  * A function defined in the catalog.
  *
- * @param name name of the function
+ * @param identifier name of the function
  * @param className fully qualified class name, e.g. "org.apache.spark.util.MyFunc"
+ * @param resources resource types and Uris used by the function
  */
-case class Function(
-  name: String,
-  className: String
-)
+case class CatalogFunction(
+    identifier: FunctionIdentifier,
+    className: String,
+    resources: Seq[FunctionResource])
 
 
 /**
  * Storage format, used to describe how a partition or a table is stored.
  */
-case class StorageFormat(
-  locationUri: String,
-  inputFormat: String,
-  outputFormat: String,
-  serde: String,
-  serdeProperties: Map[String, String]
-)
+case class CatalogStorageFormat(
+    locationUri: Option[String],
+    inputFormat: Option[String],
+    outputFormat: Option[String],
+    serde: Option[String],
+    compressed: Boolean,
+    serdeProperties: Map[String, String]) {
 
+  override def toString: String = {
+    val serdePropsToString =
+      if (serdeProperties.nonEmpty) {
+        s"Properties: " + serdeProperties.map(p => p._1 + "=" + p._2).mkString("[", ", ", "]")
+      } else {
+        ""
+      }
+    val output =
+      Seq(locationUri.map("Location: " + _).getOrElse(""),
+        inputFormat.map("InputFormat: " + _).getOrElse(""),
+        outputFormat.map("OutputFormat: " + _).getOrElse(""),
+        if (compressed) "Compressed" else "",
+        serde.map("Serde: " + _).getOrElse(""),
+        serdePropsToString)
+    output.filter(_.nonEmpty).mkString("Storage(", ", ", ")")
+  }
+
+}
+
+object CatalogStorageFormat {
+  /** Empty storage format for default values and copies. */
+  val empty = CatalogStorageFormat(locationUri = None, inputFormat = None,
+    outputFormat = None, serde = None, compressed = false, serdeProperties = Map.empty)
+}
 
 /**
  * A column in a table.
  */
-case class Column(
-  name: String,
-  dataType: String,
-  nullable: Boolean,
-  comment: String
-)
+case class CatalogColumn(
+    name: String,
+    // This may be null when used to create views. TODO: make this type-safe; this is left
+    // as a string due to issues in converting Hive varchars to and from SparkSQL strings.
+    @Nullable dataType: String,
+    nullable: Boolean = true,
+    comment: Option[String] = None) {
 
+  override def toString: String = {
+    val output =
+      Seq(s"`$name`",
+        dataType,
+        if (!nullable) "NOT NULL" else "",
+        comment.map("(" + _ + ")").getOrElse(""))
+    output.filter(_.nonEmpty).mkString(" ")
+  }
+
+}
 
 /**
  * A partition (Hive style) defined in the catalog.
@@ -162,10 +104,9 @@ case class Column(
  * @param spec partition spec values indexed by column name
  * @param storage storage format of the partition
  */
-case class TablePartition(
-  spec: Catalog.PartitionSpec,
-  storage: StorageFormat
-)
+case class CatalogTablePartition(
+    spec: CatalogTypes.TablePartitionSpec,
+    storage: CatalogStorageFormat)
 
 
 /**
@@ -173,41 +114,158 @@ case class TablePartition(
  *
  * Note that Hive's metastore also tracks skewed columns. We should consider adding that in the
  * future once we have a better understanding of how we want to handle skewed columns.
+ *
+ * @param unsupportedFeatures is a list of string descriptions of features that are used by the
+ *        underlying table but not supported by Spark SQL yet.
  */
-case class Table(
-  name: String,
-  description: String,
-  schema: Seq[Column],
-  partitionColumns: Seq[Column],
-  sortColumns: Seq[Column],
-  storage: StorageFormat,
-  numBuckets: Int,
-  properties: Map[String, String],
-  tableType: String,
-  createTime: Long,
-  lastAccessTime: Long,
-  viewOriginalText: Option[String],
-  viewText: Option[String]) {
+case class CatalogTable(
+    identifier: TableIdentifier,
+    tableType: CatalogTableType,
+    storage: CatalogStorageFormat,
+    schema: Seq[CatalogColumn],
+    partitionColumnNames: Seq[String] = Seq.empty,
+    sortColumnNames: Seq[String] = Seq.empty,
+    bucketColumnNames: Seq[String] = Seq.empty,
+    numBuckets: Int = -1,
+    owner: String = "",
+    createTime: Long = System.currentTimeMillis,
+    lastAccessTime: Long = -1,
+    properties: Map[String, String] = Map.empty,
+    viewOriginalText: Option[String] = None,
+    viewText: Option[String] = None,
+    comment: Option[String] = None,
+    unsupportedFeatures: Seq[String] = Seq.empty) {
 
-  require(tableType == "EXTERNAL_TABLE" || tableType == "INDEX_TABLE" ||
-    tableType == "MANAGED_TABLE" || tableType == "VIRTUAL_VIEW")
+  // Verify that the provided columns are part of the schema
+  private val colNames = schema.map(_.name).toSet
+  private def requireSubsetOfSchema(cols: Seq[String], colType: String): Unit = {
+    require(cols.toSet.subsetOf(colNames), s"$colType columns (${cols.mkString(", ")}) " +
+      s"must be a subset of schema (${colNames.mkString(", ")}) in table '$identifier'")
+  }
+  requireSubsetOfSchema(partitionColumnNames, "partition")
+  requireSubsetOfSchema(sortColumnNames, "sort")
+  requireSubsetOfSchema(bucketColumnNames, "bucket")
+
+  /** Columns this table is partitioned by. */
+  def partitionColumns: Seq[CatalogColumn] =
+    schema.filter { c => partitionColumnNames.contains(c.name) }
+
+  /** Return the database this table was specified to belong to, assuming it exists. */
+  def database: String = identifier.database.getOrElse {
+    throw new AnalysisException(s"table $identifier did not specify database")
+  }
+
+  /** Return the fully qualified name of this table, assuming the database was specified. */
+  def qualifiedName: String = identifier.unquotedString
+
+  /** Syntactic sugar to update a field in `storage`. */
+  def withNewStorage(
+      locationUri: Option[String] = storage.locationUri,
+      inputFormat: Option[String] = storage.inputFormat,
+      outputFormat: Option[String] = storage.outputFormat,
+      compressed: Boolean = false,
+      serde: Option[String] = storage.serde,
+      serdeProperties: Map[String, String] = storage.serdeProperties): CatalogTable = {
+    copy(storage = CatalogStorageFormat(
+      locationUri, inputFormat, outputFormat, serde, compressed, serdeProperties))
+  }
+
+  override def toString: String = {
+    val tableProperties = properties.map(p => p._1 + "=" + p._2).mkString("[", ", ", "]")
+    val partitionColumns = partitionColumnNames.map("`" + _ + "`").mkString("[", ", ", "]")
+    val sortColumns = sortColumnNames.map("`" + _ + "`").mkString("[", ", ", "]")
+    val bucketColumns = bucketColumnNames.map("`" + _ + "`").mkString("[", ", ", "]")
+
+    val output =
+      Seq(s"Table: ${identifier.quotedString}",
+        if (owner.nonEmpty) s"Owner: $owner" else "",
+        s"Created: ${new Date(createTime).toString}",
+        s"Last Access: ${new Date(lastAccessTime).toString}",
+        s"Type: ${tableType.name}",
+        if (schema.nonEmpty) s"Schema: ${schema.mkString("[", ", ", "]")}" else "",
+        if (partitionColumnNames.nonEmpty) s"Partition Columns: $partitionColumns" else "",
+        if (numBuckets != -1) s"Num Buckets: $numBuckets" else "",
+        if (bucketColumnNames.nonEmpty) s"Bucket Columns: $bucketColumns" else "",
+        if (sortColumnNames.nonEmpty) s"Sort Columns: $sortColumns" else "",
+        viewOriginalText.map("Original View: " + _).getOrElse(""),
+        viewText.map("View: " + _).getOrElse(""),
+        comment.map("Comment: " + _).getOrElse(""),
+        if (properties.nonEmpty) s"Properties: $tableProperties" else "",
+        s"$storage")
+
+    output.filter(_.nonEmpty).mkString("CatalogTable(\n\t", "\n\t", ")")
+  }
+
+}
+
+
+case class CatalogTableType private(name: String)
+object CatalogTableType {
+  val EXTERNAL = new CatalogTableType("EXTERNAL")
+  val MANAGED = new CatalogTableType("MANAGED")
+  val INDEX = new CatalogTableType("INDEX")
+  val VIEW = new CatalogTableType("VIEW")
 }
 
 
 /**
  * A database defined in the catalog.
  */
-case class Database(
-  name: String,
-  description: String,
-  locationUri: String,
-  properties: Map[String, String]
-)
+case class CatalogDatabase(
+    name: String,
+    description: String,
+    locationUri: String,
+    properties: Map[String, String])
 
 
-object Catalog {
+object CatalogTypes {
   /**
-   * Specifications of a table partition indexed by column name.
+   * Specifications of a table partition. Mapping column name to column value.
    */
-  type PartitionSpec = Map[String, String]
+  type TablePartitionSpec = Map[String, String]
+}
+
+
+/**
+ * An interface that is implemented by logical plans to return the underlying catalog table.
+ * If we can in the future consolidate SimpleCatalogRelation and MetastoreRelation, we should
+ * probably remove this interface.
+ */
+trait CatalogRelation {
+  def catalogTable: CatalogTable
+  def output: Seq[Attribute]
+}
+
+
+/**
+ * A [[LogicalPlan]] that wraps [[CatalogTable]].
+ *
+ * Note that in the future we should consolidate this and HiveCatalogRelation.
+ */
+case class SimpleCatalogRelation(
+    databaseName: String,
+    metadata: CatalogTable,
+    alias: Option[String] = None)
+  extends LeafNode with CatalogRelation {
+
+  override def catalogTable: CatalogTable = metadata
+
+  override lazy val resolved: Boolean = false
+
+  override val output: Seq[Attribute] = {
+    val cols = catalogTable.schema
+      .filter { c => !catalogTable.partitionColumnNames.contains(c.name) }
+    (cols ++ catalogTable.partitionColumns).map { f =>
+      AttributeReference(
+        f.name,
+        CatalystSqlParser.parseDataType(f.dataType),
+        // Since data can be dumped in randomly with no validation, everything is nullable.
+        nullable = true
+      )(qualifier = Some(alias.getOrElse(metadata.identifier.table)))
+    }
+  }
+
+  require(
+    metadata.identifier.database == Some(databaseName),
+    "provided database does not match the one specified in the table definition")
 }

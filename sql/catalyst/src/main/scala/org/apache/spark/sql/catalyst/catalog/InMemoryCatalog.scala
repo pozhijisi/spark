@@ -17,71 +17,91 @@
 
 package org.apache.spark.sql.catalyst.catalog
 
+import java.io.IOException
+
 import scala.collection.mutable
 
-import org.apache.spark.sql.AnalysisException
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.Path
 
+import org.apache.spark.SparkException
+import org.apache.spark.sql.AnalysisException
+import org.apache.spark.sql.catalyst.{FunctionIdentifier, TableIdentifier}
+import org.apache.spark.sql.catalyst.analysis._
+import org.apache.spark.sql.catalyst.util.StringUtils
 
 /**
  * An in-memory (ephemeral) implementation of the system catalog.
  *
+ * This is a dummy implementation that does not require setting up external systems.
+ * It is intended for testing or exploration purposes only and should not be used
+ * in production.
+ *
  * All public methods should be synchronized for thread-safety.
  */
-class InMemoryCatalog extends Catalog {
-  import Catalog._
+class InMemoryCatalog(hadoopConfig: Configuration = new Configuration) extends ExternalCatalog {
+  import CatalogTypes.TablePartitionSpec
 
-  private class TableDesc(var table: Table) {
-    val partitions = new mutable.HashMap[PartitionSpec, TablePartition]
+  private class TableDesc(var table: CatalogTable) {
+    val partitions = new mutable.HashMap[TablePartitionSpec, CatalogTablePartition]
   }
 
-  private class DatabaseDesc(var db: Database) {
+  private class DatabaseDesc(var db: CatalogDatabase) {
     val tables = new mutable.HashMap[String, TableDesc]
-    val functions = new mutable.HashMap[String, Function]
+    val functions = new mutable.HashMap[String, CatalogFunction]
   }
 
+  // Database name -> description
   private val catalog = new scala.collection.mutable.HashMap[String, DatabaseDesc]
 
-  private def filterPattern(names: Seq[String], pattern: String): Seq[String] = {
-    val regex = pattern.replaceAll("\\*", ".*").r
-    names.filter { funcName => regex.pattern.matcher(funcName).matches() }
-  }
-
-  private def existsFunction(db: String, funcName: String): Boolean = {
-    assertDbExists(db)
-    catalog(db).functions.contains(funcName)
-  }
-
-  private def existsTable(db: String, table: String): Boolean = {
-    assertDbExists(db)
-    catalog(db).tables.contains(table)
-  }
-
-  private def existsPartition(db: String, table: String, spec: PartitionSpec): Boolean = {
-    assertTableExists(db, table)
+  private def partitionExists(db: String, table: String, spec: TablePartitionSpec): Boolean = {
+    requireTableExists(db, table)
     catalog(db).tables(table).partitions.contains(spec)
   }
 
-  private def assertDbExists(db: String): Unit = {
-    if (!catalog.contains(db)) {
-      throw new AnalysisException(s"Database $db does not exist")
+  private def requireFunctionExists(db: String, funcName: String): Unit = {
+    if (!functionExists(db, funcName)) {
+      throw new NoSuchFunctionException(db = db, func = funcName)
     }
   }
 
-  private def assertFunctionExists(db: String, funcName: String): Unit = {
-    if (!existsFunction(db, funcName)) {
-      throw new AnalysisException(s"Function $funcName does not exist in $db database")
+  private def requireFunctionNotExists(db: String, funcName: String): Unit = {
+    if (functionExists(db, funcName)) {
+      throw new FunctionAlreadyExistsException(db = db, func = funcName)
     }
   }
 
-  private def assertTableExists(db: String, table: String): Unit = {
-    if (!existsTable(db, table)) {
-      throw new AnalysisException(s"Table $table does not exist in $db database")
+  private def requireTableExists(db: String, table: String): Unit = {
+    if (!tableExists(db, table)) {
+      throw new NoSuchTableException(db = db, table = table)
     }
   }
 
-  private def assertPartitionExists(db: String, table: String, spec: PartitionSpec): Unit = {
-    if (!existsPartition(db, table, spec)) {
-      throw new AnalysisException(s"Partition does not exist in database $db table $table: $spec")
+  private def requireTableNotExists(db: String, table: String): Unit = {
+    if (tableExists(db, table)) {
+      throw new TableAlreadyExistsException(db = db, table = table)
+    }
+  }
+
+  private def requirePartitionsExist(
+      db: String,
+      table: String,
+      specs: Seq[TablePartitionSpec]): Unit = {
+    specs.foreach { s =>
+      if (!partitionExists(db, table, s)) {
+        throw new NoSuchPartitionException(db = db, table = table, spec = s)
+      }
+    }
+  }
+
+  private def requirePartitionsNotExist(
+      db: String,
+      table: String,
+      specs: Seq[TablePartitionSpec]): Unit = {
+    specs.foreach { s =>
+      if (partitionExists(db, table, s)) {
+        throw new PartitionAlreadyExistsException(db = db, table = table, spec = s)
+      }
     }
   }
 
@@ -90,13 +110,22 @@ class InMemoryCatalog extends Catalog {
   // --------------------------------------------------------------------------
 
   override def createDatabase(
-      dbDefinition: Database,
+      dbDefinition: CatalogDatabase,
       ignoreIfExists: Boolean): Unit = synchronized {
     if (catalog.contains(dbDefinition.name)) {
       if (!ignoreIfExists) {
-        throw new AnalysisException(s"Database ${dbDefinition.name} already exists.")
+        throw new DatabaseAlreadyExistsException(dbDefinition.name)
       }
     } else {
+      try {
+        val location = new Path(dbDefinition.locationUri)
+        val fs = location.getFileSystem(hadoopConfig)
+        fs.mkdirs(location)
+      } catch {
+        case e: IOException =>
+          throw new SparkException(s"Unable to create database ${dbDefinition.name} as failed " +
+            s"to create its directory ${dbDefinition.locationUri}", e)
+      }
       catalog.put(dbDefinition.name, new DatabaseDesc(dbDefinition))
     }
   }
@@ -109,39 +138,54 @@ class InMemoryCatalog extends Catalog {
       if (!cascade) {
         // If cascade is false, make sure the database is empty.
         if (catalog(db).tables.nonEmpty) {
-          throw new AnalysisException(s"Database $db is not empty. One or more tables exist.")
+          throw new AnalysisException(s"Database '$db' is not empty. One or more tables exist.")
         }
         if (catalog(db).functions.nonEmpty) {
-          throw new AnalysisException(s"Database $db is not empty. One or more functions exist.")
+          throw new AnalysisException(s"Database '$db' is not empty. One or more functions exist.")
         }
       }
       // Remove the database.
+      val dbDefinition = catalog(db).db
+      try {
+        val location = new Path(dbDefinition.locationUri)
+        val fs = location.getFileSystem(hadoopConfig)
+        fs.delete(location, true)
+      } catch {
+        case e: IOException =>
+          throw new SparkException(s"Unable to drop database ${dbDefinition.name} as failed " +
+            s"to delete its directory ${dbDefinition.locationUri}", e)
+      }
       catalog.remove(db)
     } else {
       if (!ignoreIfNotExists) {
-        throw new AnalysisException(s"Database $db does not exist")
+        throw new NoSuchDatabaseException(db)
       }
     }
   }
 
-  override def alterDatabase(db: String, dbDefinition: Database): Unit = synchronized {
-    assertDbExists(db)
-    assert(db == dbDefinition.name)
-    catalog(db).db = dbDefinition
+  override def alterDatabase(dbDefinition: CatalogDatabase): Unit = synchronized {
+    requireDbExists(dbDefinition.name)
+    catalog(dbDefinition.name).db = dbDefinition
   }
 
-  override def getDatabase(db: String): Database = synchronized {
-    assertDbExists(db)
+  override def getDatabase(db: String): CatalogDatabase = synchronized {
+    requireDbExists(db)
     catalog(db).db
   }
 
+  override def databaseExists(db: String): Boolean = synchronized {
+    catalog.contains(db)
+  }
+
   override def listDatabases(): Seq[String] = synchronized {
-    catalog.keySet.toSeq
+    catalog.keySet.toSeq.sorted
   }
 
   override def listDatabases(pattern: String): Seq[String] = synchronized {
-    filterPattern(listDatabases(), pattern)
+    StringUtils.filterPattern(listDatabases(), pattern)
   }
+
+  override def setCurrentDatabase(db: String): Unit = { /* no-op */ }
 
   // --------------------------------------------------------------------------
   // Tables
@@ -149,15 +193,27 @@ class InMemoryCatalog extends Catalog {
 
   override def createTable(
       db: String,
-      tableDefinition: Table,
+      tableDefinition: CatalogTable,
       ignoreIfExists: Boolean): Unit = synchronized {
-    assertDbExists(db)
-    if (existsTable(db, tableDefinition.name)) {
+    requireDbExists(db)
+    val table = tableDefinition.identifier.table
+    if (tableExists(db, table)) {
       if (!ignoreIfExists) {
-        throw new AnalysisException(s"Table ${tableDefinition.name} already exists in $db database")
+        throw new TableAlreadyExistsException(db = db, table = table)
       }
     } else {
-      catalog(db).tables.put(tableDefinition.name, new TableDesc(tableDefinition))
+      if (tableDefinition.tableType == CatalogTableType.MANAGED) {
+        val dir = new Path(catalog(db).db.locationUri, table)
+        try {
+          val fs = dir.getFileSystem(hadoopConfig)
+          fs.mkdirs(dir)
+        } catch {
+          case e: IOException =>
+            throw new SparkException(s"Unable to create table $table as failed " +
+              s"to create its directory $dir", e)
+        }
+      }
+      catalog(db).tables.put(table, new TableDesc(tableDefinition))
     }
   }
 
@@ -165,43 +221,97 @@ class InMemoryCatalog extends Catalog {
       db: String,
       table: String,
       ignoreIfNotExists: Boolean): Unit = synchronized {
-    assertDbExists(db)
-    if (existsTable(db, table)) {
+    requireDbExists(db)
+    if (tableExists(db, table)) {
+      if (getTable(db, table).tableType == CatalogTableType.MANAGED) {
+        val dir = new Path(catalog(db).db.locationUri, table)
+        try {
+          val fs = dir.getFileSystem(hadoopConfig)
+          fs.delete(dir, true)
+        } catch {
+          case e: IOException =>
+            throw new SparkException(s"Unable to drop table $table as failed " +
+              s"to delete its directory $dir", e)
+        }
+      }
       catalog(db).tables.remove(table)
     } else {
       if (!ignoreIfNotExists) {
-        throw new AnalysisException(s"Table $table does not exist in $db database")
+        throw new NoSuchTableException(db = db, table = table)
       }
     }
   }
 
   override def renameTable(db: String, oldName: String, newName: String): Unit = synchronized {
-    assertTableExists(db, oldName)
+    requireTableExists(db, oldName)
+    requireTableNotExists(db, newName)
     val oldDesc = catalog(db).tables(oldName)
-    oldDesc.table = oldDesc.table.copy(name = newName)
+    oldDesc.table = oldDesc.table.copy(identifier = TableIdentifier(newName, Some(db)))
+
+    if (oldDesc.table.tableType == CatalogTableType.MANAGED) {
+      val oldDir = new Path(catalog(db).db.locationUri, oldName)
+      val newDir = new Path(catalog(db).db.locationUri, newName)
+      try {
+        val fs = oldDir.getFileSystem(hadoopConfig)
+        fs.rename(oldDir, newDir)
+      } catch {
+        case e: IOException =>
+          throw new SparkException(s"Unable to rename table $oldName to $newName as failed " +
+            s"to rename its directory $oldDir", e)
+      }
+    }
+
     catalog(db).tables.put(newName, oldDesc)
     catalog(db).tables.remove(oldName)
   }
 
-  override def alterTable(db: String, table: String, tableDefinition: Table): Unit = synchronized {
-    assertTableExists(db, table)
-    assert(table == tableDefinition.name)
-    catalog(db).tables(table).table = tableDefinition
+  override def alterTable(db: String, tableDefinition: CatalogTable): Unit = synchronized {
+    requireTableExists(db, tableDefinition.identifier.table)
+    catalog(db).tables(tableDefinition.identifier.table).table = tableDefinition
   }
 
-  override def getTable(db: String, table: String): Table = synchronized {
-    assertTableExists(db, table)
+  override def getTable(db: String, table: String): CatalogTable = synchronized {
+    requireTableExists(db, table)
     catalog(db).tables(table).table
   }
 
+  override def getTableOption(db: String, table: String): Option[CatalogTable] = synchronized {
+    if (!tableExists(db, table)) None else Option(catalog(db).tables(table).table)
+  }
+
+  override def tableExists(db: String, table: String): Boolean = synchronized {
+    requireDbExists(db)
+    catalog(db).tables.contains(table)
+  }
+
   override def listTables(db: String): Seq[String] = synchronized {
-    assertDbExists(db)
-    catalog(db).tables.keySet.toSeq
+    requireDbExists(db)
+    catalog(db).tables.keySet.toSeq.sorted
   }
 
   override def listTables(db: String, pattern: String): Seq[String] = synchronized {
-    assertDbExists(db)
-    filterPattern(listTables(db), pattern)
+    StringUtils.filterPattern(listTables(db), pattern)
+  }
+
+  override def loadTable(
+      db: String,
+      table: String,
+      loadPath: String,
+      isOverwrite: Boolean,
+      holdDDLTime: Boolean): Unit = {
+    throw new UnsupportedOperationException("loadTable is not implemented")
+  }
+
+  override def loadPartition(
+      db: String,
+      table: String,
+      loadPath: String,
+      partition: TablePartitionSpec,
+      isOverwrite: Boolean,
+      holdDDLTime: Boolean,
+      inheritTableSpecs: Boolean,
+      isSkewedStoreAsSubdir: Boolean): Unit = {
+    throw new UnsupportedOperationException("loadPartition is not implemented.")
   }
 
   // --------------------------------------------------------------------------
@@ -211,63 +321,141 @@ class InMemoryCatalog extends Catalog {
   override def createPartitions(
       db: String,
       table: String,
-      parts: Seq[TablePartition],
+      parts: Seq[CatalogTablePartition],
       ignoreIfExists: Boolean): Unit = synchronized {
-    assertTableExists(db, table)
+    requireTableExists(db, table)
     val existingParts = catalog(db).tables(table).partitions
     if (!ignoreIfExists) {
       val dupSpecs = parts.collect { case p if existingParts.contains(p.spec) => p.spec }
       if (dupSpecs.nonEmpty) {
-        val dupSpecsStr = dupSpecs.mkString("\n===\n")
-        throw new AnalysisException(
-          s"The following partitions already exist in database $db table $table:\n$dupSpecsStr")
+        throw new PartitionsAlreadyExistException(db = db, table = table, specs = dupSpecs)
       }
     }
-    parts.foreach { p => existingParts.put(p.spec, p) }
+
+    val tableDir = new Path(catalog(db).db.locationUri, table)
+    val partitionColumnNames = getTable(db, table).partitionColumnNames
+    // TODO: we should follow hive to roll back if one partition path failed to create.
+    parts.foreach { p =>
+      // If location is set, the partition is using an external partition location and we don't
+      // need to handle its directory.
+      if (p.storage.locationUri.isEmpty) {
+        val partitionPath = partitionColumnNames.flatMap { col =>
+          p.spec.get(col).map(col + "=" + _)
+        }.mkString("/")
+        try {
+          val fs = tableDir.getFileSystem(hadoopConfig)
+          fs.mkdirs(new Path(tableDir, partitionPath))
+        } catch {
+          case e: IOException =>
+            throw new SparkException(s"Unable to create partition path $partitionPath", e)
+        }
+      }
+      existingParts.put(p.spec, p)
+    }
   }
 
   override def dropPartitions(
       db: String,
       table: String,
-      partSpecs: Seq[PartitionSpec],
+      partSpecs: Seq[TablePartitionSpec],
       ignoreIfNotExists: Boolean): Unit = synchronized {
-    assertTableExists(db, table)
+    requireTableExists(db, table)
     val existingParts = catalog(db).tables(table).partitions
     if (!ignoreIfNotExists) {
       val missingSpecs = partSpecs.collect { case s if !existingParts.contains(s) => s }
       if (missingSpecs.nonEmpty) {
-        val missingSpecsStr = missingSpecs.mkString("\n===\n")
-        throw new AnalysisException(
-          s"The following partitions do not exist in database $db table $table:\n$missingSpecsStr")
+        throw new NoSuchPartitionsException(db = db, table = table, specs = missingSpecs)
       }
     }
-    partSpecs.foreach(existingParts.remove)
+
+    val tableDir = new Path(catalog(db).db.locationUri, table)
+    val partitionColumnNames = getTable(db, table).partitionColumnNames
+    // TODO: we should follow hive to roll back if one partition path failed to delete.
+    partSpecs.foreach { p =>
+      // If location is set, the partition is using an external partition location and we don't
+      // need to handle its directory.
+      if (existingParts.contains(p) && existingParts(p).storage.locationUri.isEmpty) {
+        val partitionPath = partitionColumnNames.flatMap { col =>
+          p.get(col).map(col + "=" + _)
+        }.mkString("/")
+        try {
+          val fs = tableDir.getFileSystem(hadoopConfig)
+          fs.delete(new Path(tableDir, partitionPath), true)
+        } catch {
+          case e: IOException =>
+            throw new SparkException(s"Unable to delete partition path $partitionPath", e)
+        }
+      }
+      existingParts.remove(p)
+    }
   }
 
-  override def alterPartition(
+  override def renamePartitions(
       db: String,
       table: String,
-      spec: Map[String, String],
-      newPart: TablePartition): Unit = synchronized {
-    assertPartitionExists(db, table, spec)
-    val existingParts = catalog(db).tables(table).partitions
-    if (spec != newPart.spec) {
-      // Also a change in specs; remove the old one and add the new one back
-      existingParts.remove(spec)
+      specs: Seq[TablePartitionSpec],
+      newSpecs: Seq[TablePartitionSpec]): Unit = synchronized {
+    require(specs.size == newSpecs.size, "number of old and new partition specs differ")
+    requirePartitionsExist(db, table, specs)
+    requirePartitionsNotExist(db, table, newSpecs)
+
+    val tableDir = new Path(catalog(db).db.locationUri, table)
+    val partitionColumnNames = getTable(db, table).partitionColumnNames
+    // TODO: we should follow hive to roll back if one partition path failed to rename.
+    specs.zip(newSpecs).foreach { case (oldSpec, newSpec) =>
+      val newPart = getPartition(db, table, oldSpec).copy(spec = newSpec)
+      val existingParts = catalog(db).tables(table).partitions
+
+      // If location is set, the partition is using an external partition location and we don't
+      // need to handle its directory.
+      if (newPart.storage.locationUri.isEmpty) {
+        val oldPath = partitionColumnNames.flatMap { col =>
+          oldSpec.get(col).map(col + "=" + _)
+        }.mkString("/")
+        val newPath = partitionColumnNames.flatMap { col =>
+          newSpec.get(col).map(col + "=" + _)
+        }.mkString("/")
+        try {
+          val fs = tableDir.getFileSystem(hadoopConfig)
+          fs.rename(new Path(tableDir, oldPath), new Path(tableDir, newPath))
+        } catch {
+          case e: IOException =>
+            throw new SparkException(s"Unable to rename partition path $oldPath", e)
+        }
+      }
+
+      existingParts.remove(oldSpec)
+      existingParts.put(newSpec, newPart)
     }
-    existingParts.put(newPart.spec, newPart)
+  }
+
+  override def alterPartitions(
+      db: String,
+      table: String,
+      parts: Seq[CatalogTablePartition]): Unit = synchronized {
+    requirePartitionsExist(db, table, parts.map(p => p.spec))
+    parts.foreach { p =>
+      catalog(db).tables(table).partitions.put(p.spec, p)
+    }
   }
 
   override def getPartition(
       db: String,
       table: String,
-      spec: Map[String, String]): TablePartition = synchronized {
-    assertPartitionExists(db, table, spec)
+      spec: TablePartitionSpec): CatalogTablePartition = synchronized {
+    requirePartitionsExist(db, table, Seq(spec))
     catalog(db).tables(table).partitions(spec)
   }
 
-  override def listPartitions(db: String, table: String): Seq[TablePartition] = synchronized {
-    assertTableExists(db, table)
+  override def listPartitions(
+      db: String,
+      table: String,
+      partialSpec: Option[TablePartitionSpec] = None): Seq[CatalogTablePartition] = synchronized {
+    requireTableExists(db, table)
+    if (partialSpec.nonEmpty) {
+      throw new UnsupportedOperationException(
+        "listPartition with partial partition spec is not implemented")
+    }
     catalog(db).tables(table).partitions.values.toSeq
   }
 
@@ -275,45 +463,41 @@ class InMemoryCatalog extends Catalog {
   // Functions
   // --------------------------------------------------------------------------
 
-  override def createFunction(
-      db: String,
-      func: Function,
-      ignoreIfExists: Boolean): Unit = synchronized {
-    assertDbExists(db)
-    if (existsFunction(db, func.name)) {
-      if (!ignoreIfExists) {
-        throw new AnalysisException(s"Function $func already exists in $db database")
-      }
+  override def createFunction(db: String, func: CatalogFunction): Unit = synchronized {
+    requireDbExists(db)
+    if (functionExists(db, func.identifier.funcName)) {
+      throw new FunctionAlreadyExistsException(db = db, func = func.identifier.funcName)
     } else {
-      catalog(db).functions.put(func.name, func)
+      catalog(db).functions.put(func.identifier.funcName, func)
     }
   }
 
   override def dropFunction(db: String, funcName: String): Unit = synchronized {
-    assertFunctionExists(db, funcName)
+    requireFunctionExists(db, funcName)
     catalog(db).functions.remove(funcName)
   }
 
-  override def alterFunction(
-      db: String,
-      funcName: String,
-      funcDefinition: Function): Unit = synchronized {
-    assertFunctionExists(db, funcName)
-    if (funcName != funcDefinition.name) {
-      // Also a rename; remove the old one and add the new one back
-      catalog(db).functions.remove(funcName)
-    }
-    catalog(db).functions.put(funcDefinition.name, funcDefinition)
+  override def renameFunction(db: String, oldName: String, newName: String): Unit = synchronized {
+    requireFunctionExists(db, oldName)
+    requireFunctionNotExists(db, newName)
+    val newFunc = getFunction(db, oldName).copy(identifier = FunctionIdentifier(newName, Some(db)))
+    catalog(db).functions.remove(oldName)
+    catalog(db).functions.put(newName, newFunc)
   }
 
-  override def getFunction(db: String, funcName: String): Function = synchronized {
-    assertFunctionExists(db, funcName)
+  override def getFunction(db: String, funcName: String): CatalogFunction = synchronized {
+    requireFunctionExists(db, funcName)
     catalog(db).functions(funcName)
   }
 
+  override def functionExists(db: String, funcName: String): Boolean = synchronized {
+    requireDbExists(db)
+    catalog(db).functions.contains(funcName)
+  }
+
   override def listFunctions(db: String, pattern: String): Seq[String] = synchronized {
-    assertDbExists(db)
-    filterPattern(catalog(db).functions.keysIterator.toSeq, pattern)
+    requireDbExists(db)
+    StringUtils.filterPattern(catalog(db).functions.keysIterator.toSeq, pattern)
   }
 
 }

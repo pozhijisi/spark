@@ -60,7 +60,7 @@ _picklable_classes = [
 
 # this will call the MLlib version of pythonToJava()
 def _to_java_object_rdd(rdd):
-    """ Return an JavaRDD of Object by unpickling
+    """ Return a JavaRDD of Object by unpickling
 
     It will convert each Python object into Java object by Pyrolite, whenever the
     RDD is serialized in batch or not.
@@ -101,7 +101,7 @@ def _java2py(sc, r, encoding="bytes"):
             jrdd = sc._jvm.SerDe.javaToPython(r)
             return RDD(jrdd, sc)
 
-        if clsName == 'DataFrame':
+        if clsName == 'Dataset':
             return DataFrame(r, SQLContext.getOrCreate(sc))
 
         if clsName in _picklable_classes:

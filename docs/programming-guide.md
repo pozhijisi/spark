@@ -24,7 +24,8 @@ along with if you launch Spark's interactive shell -- either `bin/spark-shell` f
 
 <div data-lang="scala"  markdown="1">
 
-Spark {{site.SPARK_VERSION}} uses Scala {{site.SCALA_BINARY_VERSION}}. To write
+Spark {{site.SPARK_VERSION}} is built and distributed to work with Scala {{site.SCALA_BINARY_VERSION}} 
+by default. (Spark can be built to work with other versions of Scala, too.) To write
 applications in Scala, you will need to use a compatible Scala version (e.g. {{site.SCALA_BINARY_VERSION}}.X).
 
 To write a Spark application, you need to add a Maven dependency on Spark. Spark is available through Maven Central at:
@@ -239,16 +240,17 @@ use IPython, set the `PYSPARK_DRIVER_PYTHON` variable to `ipython` when running 
 $ PYSPARK_DRIVER_PYTHON=ipython ./bin/pyspark
 {% endhighlight %}
 
-You can customize the `ipython` command by setting `PYSPARK_DRIVER_PYTHON_OPTS`. For example, to launch
-the [IPython Notebook](http://ipython.org/notebook.html) with PyLab plot support:
+To use the Jupyter notebook (previously known as the IPython notebook), 
 
 {% highlight bash %}
-$ PYSPARK_DRIVER_PYTHON=ipython PYSPARK_DRIVER_PYTHON_OPTS="notebook" ./bin/pyspark
+$ PYSPARK_DRIVER_PYTHON=jupyter ./bin/pyspark
 {% endhighlight %}
 
-After the IPython Notebook server is launched, you can create a new "Python 2" notebook from
+You can customize the `ipython` or `jupyter` commands by setting `PYSPARK_DRIVER_PYTHON_OPTS`. 
+
+After the Jupyter Notebook server is launched, you can create a new "Python 2" notebook from
 the "Files" tab. Inside the notebook, you can input the command `%pylab inline` as part of
-your notebook before you start to try Spark from the IPython notebook.
+your notebook before you start to try Spark from the Jupyter notebook.
 
 </div>
 
@@ -326,7 +328,7 @@ Text file RDDs can be created using `SparkContext`'s `textFile` method. This met
 
 {% highlight scala %}
 scala> val distFile = sc.textFile("data.txt")
-distFile: RDD[String] = MappedRDD@1d4cee08
+distFile: org.apache.spark.rdd.RDD[String] = data.txt MapPartitionsRDD[10] at textFile at <console>:26
 {% endhighlight %}
 
 Once created, `distFile` can be acted on by dataset operations. For example, we can add up the sizes of all the lines using the `map` and `reduce` operations as follows: `distFile.map(s => s.length).reduce((a, b) => a + b)`.
@@ -489,7 +491,7 @@ for examples of using Cassandra / HBase ```InputFormat``` and ```OutputFormat```
 
 RDDs support two types of operations: *transformations*, which create a new dataset from an existing one, and *actions*, which return a value to the driver program after running a computation on the dataset. For example, `map` is a transformation that passes each dataset element through a function and returns a new RDD representing the results. On the other hand, `reduce` is an action that aggregates all the elements of the RDD using some function and returns the final result to the driver program (although there is also a parallel `reduceByKey` that returns a distributed dataset).
 
-All transformations in Spark are <i>lazy</i>, in that they do not compute their results right away. Instead, they just remember the transformations applied to some base dataset (e.g. a file). The transformations are only computed when an action requires a result to be returned to the driver program. This design enables Spark to run more efficiently -- for example, we can realize that a dataset created through `map` will be used in a `reduce` and return only the result of the `reduce` to the driver, rather than the larger mapped dataset.
+All transformations in Spark are <i>lazy</i>, in that they do not compute their results right away. Instead, they just remember the transformations applied to some base dataset (e.g. a file). The transformations are only computed when an action requires a result to be returned to the driver program. This design enables Spark to run more efficiently. For example, we can realize that a dataset created through `map` will be used in a `reduce` and return only the result of the `reduce` to the driver, rather than the larger mapped dataset.
 
 By default, each transformed RDD may be recomputed each time you run an action on it. However, you may also *persist* an RDD in memory using the `persist` (or `cache`) method, in which case Spark will keep the elements around on the cluster for much faster access the next time you query it. There is also support for persisting RDDs on disk, or replicated across multiple nodes.
 
@@ -616,7 +618,7 @@ class MyClass {
 }
 {% endhighlight %}
 
-Here, if we create a `new MyClass` and call `doStuff` on it, the `map` inside there references the
+Here, if we create a new `MyClass` instance and call `doStuff` on it, the `map` inside there references the
 `func1` method *of that `MyClass` instance*, so the whole object needs to be sent to the cluster. It is
 similar to writing `rdd.map(x => this.func1(x))`.
 
@@ -629,7 +631,7 @@ class MyClass {
 }
 {% endhighlight %}
 
-is equilvalent to writing `rdd.map(x => this.field + x)`, which references all of `this`. To avoid this
+is equivalent to writing `rdd.map(x => this.field + x)`, which references all of `this`. To avoid this
 issue, the simplest way is to copy `field` into a local variable instead of accessing it externally:
 
 {% highlight scala %}
@@ -1154,7 +1156,7 @@ to disk, incurring the additional overhead of disk I/O and increased garbage col
 Shuffle also generates a large number of intermediate files on disk. As of Spark 1.3, these files
 are preserved until the corresponding RDDs are no longer used and are garbage collected.
 This is done so the shuffle files don't need to be re-created if the lineage is re-computed.
-Garbage collection may happen only after a long period time, if the application retains references
+Garbage collection may happen only after a long period of time, if the application retains references
 to these RDDs or if GC does not kick in frequently. This means that long-running Spark jobs may
 consume a large amount of disk space. The temporary storage directory is specified by the
 `spark.local.dir` configuration parameter when configuring the Spark context.
@@ -1177,7 +1179,7 @@ that originally created it.
 
 In addition, each persisted RDD can be stored using a different *storage level*, allowing you, for example,
 to persist the dataset on disk, persist it in memory but as serialized Java objects (to save space),
-replicate it across nodes, or store it off-heap in [Tachyon](http://tachyon-project.org/).
+replicate it across nodes.
 These levels are set by passing a
 `StorageLevel` object ([Scala](api/scala/index.html#org.apache.spark.storage.StorageLevel),
 [Java](api/java/index.html?org/apache/spark/storage/StorageLevel.html),
@@ -1220,22 +1222,14 @@ storage levels is:
 </tr>
 <tr>
   <td> OFF_HEAP (experimental) </td>
-  <td> Store RDD in serialized format in <a href="http://tachyon-project.org">Tachyon</a>.
-    Compared to MEMORY_ONLY_SER, OFF_HEAP reduces garbage collection overhead and allows executors
-    to be smaller and to share a pool of memory, making it attractive in environments with
-    large heaps or multiple concurrent applications. Furthermore, as the RDDs reside in Tachyon,
-    the crash of an executor does not lead to losing the in-memory cache. In this mode, the memory
-    in Tachyon is discardable. Thus, Tachyon does not attempt to reconstruct a block that it evicts
-    from memory. If you plan to use Tachyon as the off heap store, Spark is compatible with Tachyon
-    out-of-the-box. Please refer to this <a href="http://tachyon-project.org/master/Running-Spark-on-Tachyon.html">page</a>
-    for the suggested version pairings.
-  </td>
+  <td> Similar to MEMORY_ONLY_SER, but store the data in
+    <a href="configuration.html#memory-management">off-heap memory</a>. This requires off-heap memory to be enabled. </td>
 </tr>
 </table>
 
 **Note:** *In Python, stored objects will always be serialized with the [Pickle](https://docs.python.org/2/library/pickle.html) library, 
 so it does not matter whether you choose a serialized level. The available storage levels in Python include `MEMORY_ONLY`, `MEMORY_ONLY_2`, 
-`MEMORY_AND_DISK`, `MEMORY_AND_DISK_2`, `DISK_ONLY`, `DISK_ONLY_2` and `OFF_HEAP`.*
+`MEMORY_AND_DISK`, `MEMORY_AND_DISK_2`, `DISK_ONLY`, and `DISK_ONLY_2`.*
 
 Spark also automatically persists some intermediate data in shuffle operations (e.g. `reduceByKey`), even without users calling `persist`. This is done to avoid recomputing the entire input if a node fails during the shuffle. We still recommend users call `persist` on the resulting RDD if they plan to reuse it.
 
@@ -1259,11 +1253,6 @@ requests from a web application). *All* the storage levels provide full fault to
 recomputing lost data, but the replicated ones let you continue running tasks on the RDD without
 waiting to recompute a lost partition.
 
-* In environments with high amounts of memory or multiple applications, the experimental `OFF_HEAP`
-mode has several advantages:
-   * It allows multiple executors to share the same pool of memory in Tachyon.
-   * It significantly reduces garbage collection costs.
-   * Cached data is not lost if individual executors crash.
 
 ### Removing Data
 
@@ -1343,15 +1332,21 @@ value of the broadcast variable (e.g. if the variable is shipped to a new node l
 
 ## Accumulators
 
-Accumulators are variables that are only "added" to through an associative operation and can
+Accumulators are variables that are only "added" to through an associative and commutative operation and can
 therefore be efficiently supported in parallel. They can be used to implement counters (as in
 MapReduce) or sums. Spark natively supports accumulators of numeric types, and programmers
-can add support for new types. If accumulators are created with a name, they will be
+can add support for new types.
+
+If accumulators are created with a name, they will be
 displayed in Spark's UI. This can be useful for understanding the progress of
 running stages (NOTE: this is not yet supported in Python).
 
+<p style="text-align: center;">
+  <img src="img/spark-webui-accumulators.png" title="Accumulators in the Spark UI" alt="Accumulators in the Spark UI" />
+</p>
+
 An accumulator is created from an initial value `v` by calling `SparkContext.accumulator(v)`. Tasks
-running on the cluster can then add to it using the `add` method or the `+=` operator (in Scala and Python).
+running on a cluster can then add to it using the `add` method or the `+=` operator (in Scala and Python).
 However, they cannot read its value.
 Only the driver program can read the accumulator's value, using its `value` method.
 
@@ -1362,48 +1357,49 @@ The code below shows an accumulator being used to add up the elements of an arra
 <div data-lang="scala"  markdown="1">
 
 {% highlight scala %}
-scala> val accum = sc.accumulator(0, "My Accumulator")
-accum: spark.Accumulator[Int] = 0
+scala> val accum = sc.longAccumulator("My Accumulator")
+accum: org.apache.spark.util.LongAccumulator = LongAccumulator(id: 0, name: Some(My Accumulator), value: 0)
 
-scala> sc.parallelize(Array(1, 2, 3, 4)).foreach(x => accum += x)
+scala> sc.parallelize(Array(1, 2, 3, 4)).foreach(x => accum.add(x))
 ...
 10/09/29 18:41:08 INFO SparkContext: Tasks finished in 0.317106 s
 
 scala> accum.value
-res2: Int = 10
+res2: Long = 10
 {% endhighlight %}
 
-While this code used the built-in support for accumulators of type Int, programmers can also
-create their own types by subclassing [AccumulatorParam](api/scala/index.html#org.apache.spark.AccumulatorParam).
-The AccumulatorParam interface has two methods: `zero` for providing a "zero value" for your data
-type, and `addInPlace` for adding two values together. For example, supposing we had a `Vector` class
+While this code used the built-in support for accumulators of type Long, programmers can also
+create their own types by subclassing [AccumulatorV2](api/scala/index.html#org.apache.spark.AccumulatorV2).
+The AccumulatorV2 abstract class has several methods which need to override: 
+`reset` for resetting the accumulator to zero, and `add` for add anothor value into the accumulator, `merge` for merging another same-type accumulator into this one. Other methods need to override can refer to scala API document. For example, supposing we had a `MyVector` class
 representing mathematical vectors, we could write:
 
 {% highlight scala %}
-object VectorAccumulatorParam extends AccumulatorParam[Vector] {
-  def zero(initialValue: Vector): Vector = {
-    Vector.zeros(initialValue.size)
+object VectorAccumulatorV2 extends AccumulatorV2[MyVector, MyVector] {
+  val vec_ : MyVector = MyVector.createZeroVector
+  def reset(): MyVector = {
+    vec_.reset()
   }
-  def addInPlace(v1: Vector, v2: Vector): Vector = {
-    v1 += v2
+  def add(v1: MyVector, v2: MyVector): MyVector = {
+    vec_.add(v2)
   }
+  ...
 }
 
 // Then, create an Accumulator of this type:
-val vecAccum = sc.accumulator(new Vector(...))(VectorAccumulatorParam)
+val myVectorAcc = new VectorAccumulatorV2
+// Then, register it into spark context:
+sc.register(myVectorAcc, "MyVectorAcc1")
 {% endhighlight %}
 
-In Scala, Spark also supports the more general [Accumulable](api/scala/index.html#org.apache.spark.Accumulable)
-interface to accumulate data where the resulting type is not the same as the elements added (e.g. build
-a list by collecting together elements), and the `SparkContext.accumulableCollection` method for accumulating
-common Scala collection types.
+Note that, when programmers define their own type of AccumulatorV2, the resulting type can be same or not same with the elements added.
 
 </div>
 
 <div data-lang="java"  markdown="1">
 
 {% highlight java %}
-Accumulator<Integer> accum = sc.accumulator(0);
+LongAccumulator accum = sc.sc().longAccumulator();
 
 sc.parallelize(Arrays.asList(1, 2, 3, 4)).foreach(x -> accum.add(x));
 // ...
@@ -1484,17 +1480,17 @@ Accumulators do not change the lazy evaluation model of Spark. If they are being
 
 <div class="codetabs">
 
-<div data-lang="scala"  markdown="1">
+<div data-lang="scala" markdown="1">
 {% highlight scala %}
 val accum = sc.accumulator(0)
-data.map { x => accum += x; f(x) }
-// Here, accum is still 0 because no actions have caused the <code>map</code> to be computed.
+data.map { x => accum += x; x }
+// Here, accum is still 0 because no actions have caused the map operation to be computed.
 {% endhighlight %}
 </div>
 
 <div data-lang="java"  markdown="1">
 {% highlight java %}
-Accumulator<Integer> accum = sc.accumulator(0);
+LongAccumulator accum = sc.sc().longAccumulator();
 data.map(x -> { accum.add(x); return f(x); });
 // Here, accum is still 0 because no actions have caused the `map` to be computed.
 {% endhighlight %}
